@@ -1,0 +1,40 @@
+==========================================
+ATTENDIFY - QUICK COMMANDS
+==========================================
+
+STEP 1: Find your tfenv location
+---------------------------------
+find ~ -name "tfenv" -type d 2>/dev/null
+
+STEP 2: Activate tfenv (use path from Step 1)
+----------------------------------------------
+source /path/to/tfenv/bin/activate
+
+STEP 3: Navigate to project
+----------------------------
+cd /Users/hasan/Documents/Github/attendify-app
+
+STEP 4: Run the app
+-------------------
+# For recognition (attendance):
+python app/main.py
+
+# For registration (new student):
+python app/register_face.py
+
+==========================================
+TROUBLESHOOTING
+==========================================
+
+If "ModuleNotFoundError":
+  pip install deepface opencv-python
+
+If wrong Python version:
+  python --version  # Should be 3.10.x
+  which python      # Should show tfenv path
+
+If TensorFlow errors:
+  python test_tensorflow.py
+
+==========================================
+

@@ -1,25 +1,45 @@
 """
-Attendify - Face Detection Module (Enhanced)
+Attendify - Face Detection and Recognition Module (Enhanced)
 
-This module performs real-time face detection using OpenCV and Haar Cascade.
-It opens the webcam, detects faces within a defined ellipse region, and provides
-visual feedback through ellipse border color changes. Everything outside the 
-ellipse is masked to black. Includes FPS display for performance monitoring.
+This module performs real-time face detection and recognition using OpenCV and Haar Cascade.
+It opens the webcam, detects faces within a defined ellipse region, and compares them with
+registered face embeddings. Everything outside the ellipse is masked to black. 
+Includes FPS display for performance monitoring.
 
 Requirements:
     - Python 3.x
     - OpenCV (cv2) - install with: pip install opencv-python
+    - face_recognition - install with: pip install face-recognition (for recognition)
+    - NumPy - install with: pip install numpy
 
 Usage:
     python main.py
 
 Controls:
     - Press 'q' to quit the application
+
+Note:
+    Face embeddings should be saved in the 'embeddings/' folder as .npy or .json files.
+    If no embeddings are found, the program runs in detection-only mode.
 """
 
 import cv2
 import time
 import numpy as np
+import os
+import json
+from pathlib import Path
+
+# Use DeepFace with ArcFace (InsightFace) for proper face embeddings
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow warnings
+
+try:
+    from deepface import DeepFace
+    DEEPFACE_AVAILABLE = True
+except (ImportError, Exception) as e:
+    DEEPFACE_AVAILABLE = False
+    DeepFace = None
 
 
 def load_face_cascade():
@@ -161,7 +181,7 @@ def apply_ellipse_mask(frame, mask):
 
 def draw_detection_ellipse(frame, center, axes, has_face_detected):
     """
-    Draw the detection ellipse on the frame with color based on face detection.
+    Draw the detection ellipse on the frame. Border stays white normally.
     
     Args:
         frame: The video frame to draw on
@@ -172,12 +192,8 @@ def draw_detection_ellipse(frame, center, axes, has_face_detected):
     Returns:
         numpy.ndarray: Frame with ellipse drawn
     """
-    # Choose color based on face detection
-    # Green when face detected, light/white when not
-    if has_face_detected:
-        ellipse_color = (0, 255, 0)  # Green (BGR)
-    else:
-        ellipse_color = (255, 255, 255)  # White (BGR)
+    # Ellipse border stays white (as per requirements)
+    ellipse_color = (255, 255, 255)  # White (BGR)
     
     # Draw the ellipse with thicker border
     cv2.ellipse(
@@ -188,7 +204,260 @@ def draw_detection_ellipse(frame, center, axes, has_face_detected):
         0,     # Start angle
         360,   # End angle
         ellipse_color,
-        3      # Thicker border (increased from 2 to 3)
+        3      # Thicker border
+    )
+    
+    return frame
+
+
+def load_embeddings(embeddings_dir="embeddings"):
+    """
+    Load all face embeddings from the specified directory.
+    Supports .npy and .json files.
+    
+    Args:
+        embeddings_dir: String - path to the embeddings directory
+    
+    Returns:
+        list: List of numpy arrays containing face embeddings
+    """
+    embeddings = []
+    embeddings_path = Path(embeddings_dir)
+    
+    if not embeddings_path.exists():
+        print(f"Embeddings directory '{embeddings_dir}' not found. Running in detection-only mode.")
+        return embeddings
+    
+    # Load .npy files
+    npy_files = list(embeddings_path.glob("*.npy"))
+    for npy_file in npy_files:
+        try:
+            embedding = np.load(npy_file)
+            # Check embedding dimension (ArcFace produces 512D, old dlib produces 128D)
+            if embedding.shape[0] == 128:
+                print(f"WARNING: {npy_file.name} appears to be from old dlib system (128D).")
+                print(f"  Please re-register using the new ArcFace system (512D embeddings).")
+                print(f"  Skipping this embedding.")
+                continue
+            elif embedding.shape[0] != 512:
+                print(f"WARNING: {npy_file.name} has unexpected dimension {embedding.shape[0]}.")
+                print(f"  Expected 512D (ArcFace). Skipping.")
+                continue
+            
+            embeddings.append(embedding)
+            print(f"Loaded embedding from: {npy_file.name} (512D ArcFace)")
+        except Exception as e:
+            print(f"Error loading {npy_file}: {e}")
+    
+    # Load .json files
+    json_files = list(embeddings_path.glob("*.json"))
+    for json_file in json_files:
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+                # Handle different JSON formats
+                if isinstance(data, list):
+                    embedding = np.array(data)
+                elif isinstance(data, dict) and 'embedding' in data:
+                    embedding = np.array(data['embedding'])
+                else:
+                    embedding = np.array(data)
+                embeddings.append(embedding)
+                print(f"Loaded embedding from: {json_file.name}")
+        except Exception as e:
+            print(f"Error loading {json_file}: {e}")
+    
+    if len(embeddings) == 0:
+        print(f"No embeddings found in '{embeddings_dir}'. Running in detection-only mode.")
+    else:
+        print(f"Loaded {len(embeddings)} face embedding(s). Recognition enabled.\n")
+    
+    return embeddings
+
+
+def extract_face_embedding(face_image):
+    """
+    Extract face embedding using DeepFace ArcFace (InsightFace) model.
+    This produces 512-dimensional discriminative embeddings suitable for identity recognition.
+    
+    Args:
+        face_image: BGR image containing a face (numpy array)
+    
+    Returns:
+        numpy.ndarray: L2-normalized face embedding vector (512 dimensions), or None if extraction fails
+    """
+    if not DEEPFACE_AVAILABLE or DeepFace is None:
+        return None
+    
+    try:
+        # Convert BGR to RGB (DeepFace expects RGB)
+        face_rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+        
+        # Extract embedding using ArcFace (InsightFace) - produces 512D embeddings
+        # DeepFace handles: face detection, alignment, preprocessing
+        embedding_result = DeepFace.represent(
+            face_rgb,
+            model_name='ArcFace',  # InsightFace/ArcFace - 512D embeddings
+            enforce_detection=True,  # Require face detection for quality
+            align=True,  # Face alignment for better accuracy
+            normalization='base'  # Base normalization
+        )
+        
+        if embedding_result and len(embedding_result) > 0:
+            embedding = np.array(embedding_result[0]['embedding'], dtype=np.float32)
+            
+            # L2 normalize the embedding (critical for proper cosine similarity)
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            else:
+                return None
+            
+            return embedding
+        else:
+            return None
+            
+    except Exception as e:
+        # Silently fail (don't spam console during recognition)
+        return None
+
+
+def cosine_similarity(embedding1, embedding2):
+    """
+    Calculate cosine similarity between two L2-normalized embeddings.
+    For normalized vectors, cosine similarity = dot product.
+    
+    Args:
+        embedding1: numpy array - first L2-normalized embedding
+        embedding2: numpy array - second L2-normalized embedding
+    
+    Returns:
+        float: Cosine similarity score (-1 to 1, higher is more similar)
+               Typical values: Same person: 0.6-0.9, Different people: <0.3
+    """
+    # Both embeddings should already be L2-normalized
+    # For normalized vectors, cosine similarity = dot product
+    similarity = np.dot(embedding1, embedding2)
+    
+    # Clamp to [-1, 1] range (should already be in this range for normalized vectors)
+    similarity = np.clip(similarity, -1.0, 1.0)
+    
+    return float(similarity)
+
+
+def find_best_match(detected_embedding, stored_embeddings, threshold=0.45):
+    """
+    Find the best matching embedding from stored embeddings using cosine similarity.
+    
+    Args:
+        detected_embedding: numpy array - L2-normalized embedding of detected face
+        stored_embeddings: list of numpy arrays - L2-normalized stored face embeddings
+        threshold: float - minimum cosine similarity threshold (default 0.45)
+                   Expected: Same person: 0.6-0.9, Different people: <0.3
+    
+    Returns:
+        bool: True if a match is found above threshold, False otherwise
+    """
+    if len(stored_embeddings) == 0:
+        return False
+    
+    best_similarity = -1.0  # Start with minimum similarity
+    
+    for stored_embedding in stored_embeddings:
+        # Ensure embeddings have same shape
+        if detected_embedding.shape != stored_embedding.shape:
+            continue
+        
+        # Normalize stored embedding if not already normalized (for backward compatibility)
+        stored_norm = np.linalg.norm(stored_embedding)
+        if stored_norm > 0:
+            stored_normalized = stored_embedding / stored_norm
+        else:
+            continue
+        
+        # Calculate cosine similarity (both should be normalized)
+        similarity = cosine_similarity(detected_embedding, stored_normalized)
+        best_similarity = max(best_similarity, similarity)
+    
+    # Debug output
+    print(f"Best similarity: {best_similarity:.3f} (threshold: {threshold})")
+    
+    return best_similarity >= threshold
+
+
+def extract_face_region(frame, face_rect, padding=20):
+    """
+    Extract the face region from the frame with padding.
+    
+    Args:
+        frame: The full video frame
+        face_rect: Tuple (x, y, w, h) - face rectangle coordinates
+        padding: Integer - padding around face in pixels
+    
+    Returns:
+        numpy.ndarray: Cropped face image, or None if extraction fails
+    """
+    x, y, w, h = face_rect
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Add padding and ensure coordinates are within frame bounds
+    x1 = max(0, x - padding)
+    y1 = max(0, y - padding)
+    x2 = min(frame_width, x + w + padding)
+    y2 = min(frame_height, y + h + padding)
+    
+    face_region = frame[y1:y2, x1:x2]
+    
+    # Ensure we have a valid face region
+    if face_region.size > 0 and face_region.shape[0] > 10 and face_region.shape[1] > 10:
+        return face_region
+    else:
+        return None
+
+
+def display_match_message(frame, ellipse_center, ellipse_axes):
+    """
+    Display "Match found" message outside the ellipse area.
+    
+    Args:
+        frame: The video frame to draw on
+        ellipse_center: Tuple (cx, cy) - center of the ellipse
+        ellipse_axes: Tuple (a, b) - full lengths of the ellipse axes
+    
+    Returns:
+        numpy.ndarray: Frame with message drawn
+    """
+    frame_height, frame_width = frame.shape[:2]
+    
+    # Position message at the bottom of the frame, outside the ellipse
+    # Calculate ellipse bottom position
+    ellipse_bottom = ellipse_center[1] + ellipse_axes[1] // 2
+    
+    # Position message below the ellipse with some margin
+    message_y = min(frame_height - 40, ellipse_bottom + 50)
+    
+    message_text = "Match found"
+    text_size = cv2.getTextSize(message_text, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+    text_x = (frame_width - text_size[0]) // 2
+    
+    # Draw background rectangle for better readability
+    cv2.rectangle(
+        frame,
+        (text_x - 15, message_y - text_size[1] - 10),
+        (text_x + text_size[0] + 15, message_y + 10),
+        (0, 0, 0),  # Black background
+        -1
+    )
+    
+    # Draw the message in green
+    cv2.putText(
+        frame,
+        message_text,
+        (text_x, message_y),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        1.2,
+        (0, 255, 0),  # Green color
+        3
     )
     
     return frame
@@ -196,10 +465,36 @@ def draw_detection_ellipse(frame, center, axes, has_face_detected):
 
 def main():
     """
-    Main function to run the enhanced face detection application.
+    Main function to run the enhanced face detection and recognition application.
     """
-    print("Initializing Attendify Face Detection Module (Enhanced)...")
+    print("Initializing Attendify Face Detection and Recognition Module...")
     print("Press 'q' to quit the application.\n")
+    
+    # Load stored face embeddings
+    stored_embeddings = load_embeddings("embeddings")
+    
+    # Normalize all stored embeddings (for backward compatibility with old embeddings)
+    normalized_stored_embeddings = []
+    for emb in stored_embeddings:
+        norm = np.linalg.norm(emb)
+        if norm > 0:
+            normalized_stored_embeddings.append(emb / norm)
+        else:
+            print(f"Warning: Skipping zero-norm embedding")
+    
+    stored_embeddings = normalized_stored_embeddings
+    recognition_enabled = len(stored_embeddings) > 0 and DEEPFACE_AVAILABLE
+    
+    if recognition_enabled:
+        print("Face recognition enabled (using DeepFace with ArcFace).")
+    else:
+        print("Running in detection-only mode.")
+        if not DEEPFACE_AVAILABLE:
+            print("\nTo install TensorFlow for Apple Silicon Mac:")
+            print("  1. pip install tensorflow-macos tensorflow-metal")
+            print("  2. pip install deepface")
+            print("\nNote: tensorflow-metal enables GPU acceleration on Apple Silicon.")
+    print()
     
     # Load the face cascade classifier
     try:
@@ -223,6 +518,11 @@ def main():
     fps_start_time = time.time()
     fps_frame_count = 0
     fps = 0
+    
+    # Recognition variables
+    match_found = False
+    last_recognition_time = 0
+    recognition_interval = 0.5  # Perform recognition every 0.5 seconds to reduce CPU load
     
     try:
         while True:
@@ -261,14 +561,43 @@ def main():
             # Determine if any faces were detected
             has_face_detected = len(filtered_faces) > 0
             
+            # Perform face recognition if enabled and face is detected
+            match_found = False
+            if recognition_enabled and has_face_detected:
+                current_time = time.time()
+                # Perform recognition at intervals to reduce CPU load
+                if current_time - last_recognition_time >= recognition_interval:
+                    if len(filtered_faces) > 0:
+                        # Extract face region from original frame (before masking)
+                        face_rect = filtered_faces[0]
+                        face_image = extract_face_region(frame, face_rect)
+                        
+                        if face_image is not None:
+                            # Extract embedding from detected face
+                            detected_embedding = extract_face_embedding(face_image)
+                            
+                            if detected_embedding is not None:
+                                # Compare with stored embeddings
+                                match_found = find_best_match(
+                                    detected_embedding,
+                                    stored_embeddings,
+                                    threshold=0.45  # Cosine similarity threshold (0.45 = 45% similarity)
+                                )
+                    
+                    last_recognition_time = current_time
+            
             # Create ellipse mask to black out everything outside
             ellipse_mask = create_ellipse_mask(frame.shape, ellipse_center, ellipse_axes)
             
             # Apply mask to black out everything outside the ellipse
             frame = apply_ellipse_mask(frame, ellipse_mask)
             
-            # Draw the detection ellipse with color based on face detection
+            # Draw the detection ellipse (border stays white)
             frame = draw_detection_ellipse(frame, ellipse_center, ellipse_axes, has_face_detected)
+            
+            # Display "Match found" message if recognition match is found
+            if match_found:
+                frame = display_match_message(frame, ellipse_center, ellipse_axes)
             
             # Calculate FPS
             fps_frame_count += 1
@@ -292,17 +621,17 @@ def main():
                 2
             )
             
-            # Display the number of faces detected (inside ellipse)
-            face_count = len(filtered_faces)
-            if face_count > 0:
+            # Display recognition status (optional, can be removed if not needed)
+            if recognition_enabled:
+                status_text = "Recognition: ON" if has_face_detected else "Recognition: Ready"
                 cv2.putText(
                     frame,
-                    f'Faces detected: {face_count}',
+                    status_text,
                     (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX,
-                    0.7,
-                    (0, 255, 0),
-                    2
+                    0.5,
+                    (200, 200, 200),  # Light gray
+                    1
                 )
             
             # Display the frame in a window

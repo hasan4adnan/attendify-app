@@ -31,28 +31,27 @@ import time
 import numpy as np
 from datetime import datetime
 import os
+from pathlib import Path
 
-# Try face_recognition first (no TensorFlow dependency, better for Mac)
-FACE_RECOGNITION_AVAILABLE = False
+# Use DeepFace with ArcFace (InsightFace) for proper face embeddings
+# This produces 512-dimensional discriminative embeddings
 DEEPFACE_AVAILABLE = False
 DeepFace = None
 
+# Suppress TensorFlow AVX warnings (they're just warnings, not errors)
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
 try:
-    import face_recognition
-    FACE_RECOGNITION_AVAILABLE = True
-    # Don't import DeepFace if face_recognition is available (avoids TensorFlow issues)
-except ImportError:
-    FACE_RECOGNITION_AVAILABLE = False
-    # Only try DeepFace if face_recognition is not available
-    # Suppress TensorFlow AVX warnings before importing
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-    try:
-        from deepface import DeepFace
-        DEEPFACE_AVAILABLE = True
-    except (ImportError, Exception) as e:
-        DEEPFACE_AVAILABLE = False
-        DeepFace = None
-        print(f"Warning: DeepFace not available: {e}")
+    from deepface import DeepFace
+    DEEPFACE_AVAILABLE = True
+except (ImportError, Exception) as e:
+    DEEPFACE_AVAILABLE = False
+    DeepFace = None
+    print(f"ERROR: DeepFace not available: {e}")
+    print("\nTo install TensorFlow for Apple Silicon Mac:")
+    print("  1. For Apple Silicon (M1/M2/M3): pip install tensorflow-macos tensorflow-metal")
+    print("  2. Then install: pip install deepface")
+    print("\nNote: tensorflow-metal enables GPU acceleration on Apple Silicon.")
 
 
 def load_face_cascade():
@@ -219,57 +218,50 @@ def draw_detection_ellipse(frame, center, axes, has_face_detected):
 
 def extract_face_embedding(face_image):
     """
-    Extract face embedding from a face image.
-    Tries multiple methods for compatibility.
+    Extract face embedding using DeepFace ArcFace (InsightFace) model.
+    This produces 512-dimensional discriminative embeddings suitable for identity recognition.
     
     Args:
         face_image: BGR image containing a face (numpy array)
     
     Returns:
-        numpy.ndarray: Face embedding vector
+        numpy.ndarray: L2-normalized face embedding vector (512 dimensions), or None if extraction fails
     """
-    # Convert BGR to RGB
-    face_rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+    if not DEEPFACE_AVAILABLE or DeepFace is None:
+        return None
     
-    # Method 1: Try face_recognition library (uses dlib, better Mac compatibility)
-    if FACE_RECOGNITION_AVAILABLE:
-        try:
-            # face_recognition expects RGB
-            encodings = face_recognition.face_encodings(face_rgb)
-            if encodings and len(encodings) > 0:
-                return np.array(encodings[0])  # Returns 128-dimensional vector
-        except Exception as e:
-            print(f"Warning: face_recognition failed: {e}")
-    
-    # Method 2: Try DeepFace with ArcFace (only if face_recognition failed and DeepFace is available)
-    if DEEPFACE_AVAILABLE and DeepFace is not None:
-        try:
-            embedding = DeepFace.represent(
-                face_rgb,
-                model_name='ArcFace',  # InsightFace/ArcFace - better Mac compatibility
-                enforce_detection=False,
-                align=True
-            )
-            if embedding and len(embedding) > 0:
-                return np.array(embedding[0]['embedding'])
-        except Exception as e1:
-            # Fallback to VGG-Face if ArcFace fails
-            try:
-                embedding = DeepFace.represent(
-                    face_rgb,
-                    model_name='VGG-Face',
-                    enforce_detection=False,
-                    align=True
-                )
-                if embedding and len(embedding) > 0:
-                    return np.array(embedding[0]['embedding'])
-            except Exception as e2:
-                print(f"Warning: DeepFace models failed: {e2}")
-    
-    # If all methods fail
-    print("Error: Could not extract face embedding.")
-    print("Please ensure either 'face_recognition' or 'deepface' is properly installed.")
-    return None
+    try:
+        # Convert BGR to RGB (DeepFace expects RGB)
+        face_rgb = cv2.cvtColor(face_image, cv2.COLOR_BGR2RGB)
+        
+        # Extract embedding using ArcFace (InsightFace) - produces 512D embeddings
+        # DeepFace handles: face detection, alignment, preprocessing, and normalization
+        embedding_result = DeepFace.represent(
+            face_rgb,
+            model_name='ArcFace',  # InsightFace/ArcFace - 512D embeddings
+            enforce_detection=True,  # Require face detection for quality
+            align=True,  # Face alignment for better accuracy
+            normalization='base'  # Base normalization (DeepFace handles preprocessing)
+        )
+        
+        if embedding_result and len(embedding_result) > 0:
+            embedding = np.array(embedding_result[0]['embedding'], dtype=np.float32)
+            
+            # L2 normalize the embedding (critical for proper cosine similarity)
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+            else:
+                print("Warning: Zero-norm embedding detected.")
+                return None
+            
+            return embedding
+        else:
+            return None
+            
+    except Exception as e:
+        print(f"Error extracting embedding: {e}")
+        return None
 
 
 def extract_face_region(frame, face_rect, padding=20):
@@ -368,25 +360,39 @@ def display_instruction(frame, instruction_text, sub_text=""):
     return frame
 
 
-def save_embedding(embedding, filename=None):
+def save_embedding(embedding, filename=None, embeddings_dir="embeddings"):
     """
-    Save face embedding to a file.
+    Save face embedding to a file in the embeddings directory.
     
     Args:
         embedding: numpy.ndarray - the face embedding vector
         filename: Optional string - custom filename. If None, generates timestamp-based name
+        embeddings_dir: String - directory to save embeddings (default: "embeddings")
     
     Returns:
-        str: The filename used to save the embedding
+        str: The full path to the saved embedding file
     """
+    # Create embeddings directory if it doesn't exist
+    embeddings_path = Path(embeddings_dir)
+    embeddings_path.mkdir(exist_ok=True)
+    
     if filename is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"student_embedding_{timestamp}.npy"
     
-    # Save as .npy file (NumPy binary format)
-    np.save(filename, embedding)
+    # Ensure filename has .npy extension
+    if not filename.endswith('.npy'):
+        filename = filename + '.npy'
     
-    return filename
+    # Create full path
+    full_path = embeddings_path / filename
+    
+    # Save as .npy file (NumPy binary format)
+    np.save(full_path, embedding)
+    
+    print(f"Embedding saved to: {full_path}")
+    
+    return str(full_path)
 
 
 def main():
@@ -413,19 +419,19 @@ def main():
     
     print("Webcam opened successfully.")
     
-    # Check available embedding methods
-    if FACE_RECOGNITION_AVAILABLE:
-        print("Using face_recognition library (dlib-based, good Mac compatibility).")
-    elif DEEPFACE_AVAILABLE:
-        print("Using DeepFace library.")
-        print("Note: Face embedding model will be downloaded automatically on first use.")
-    else:
-        print("ERROR: No face embedding library available!")
-        print("Please install one of the following:")
-        print("  pip install face-recognition  (recommended for Mac)")
-        print("  pip install deepface")
+    # Check DeepFace availability
+    if not DEEPFACE_AVAILABLE:
+        print("ERROR: DeepFace not available!")
+        print("\nTo install TensorFlow for Apple Silicon Mac:")
+        print("  1. pip install tensorflow-macos tensorflow-metal")
+        print("  2. pip install deepface")
+        print("\nNote: tensorflow-metal enables GPU acceleration on Apple Silicon.")
         cap.release()
         return
+    
+    print("Using DeepFace with ArcFace (InsightFace) model for face embeddings.")
+    print("Note: Model will be downloaded automatically on first use (~100MB).")
+    print("This produces 512-dimensional discriminative embeddings.\n")
     
     print("Starting face registration...")
     print("Please position your face inside the ellipse.\n")
@@ -544,8 +550,13 @@ def main():
             else:
                 # All steps completed - compute final embedding
                 if len(embeddings_collected) > 0:
-                    # Average all collected embeddings
+                    # Average all collected embeddings (they're already normalized)
                     final_embedding = np.mean(embeddings_collected, axis=0)
+                    
+                    # Re-normalize the averaged embedding (important!)
+                    norm = np.linalg.norm(final_embedding)
+                    if norm > 0:
+                        final_embedding = final_embedding / norm
                     
                     # Save embedding
                     filename = save_embedding(final_embedding)
