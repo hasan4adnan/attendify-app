@@ -69,3 +69,4 @@ cd /Users/hasan/Documents/Github/attendify-app
 python app/main.py
 ```
 
+
