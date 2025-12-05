@@ -296,7 +296,7 @@ def extract_face_region(frame, face_rect, padding=20):
 
 def display_instruction(frame, instruction_text, sub_text="", ellipse_center=None, ellipse_axes=None, alpha=1.0):
     """
-    Display instruction text on the frame, positioned to the right of the ellipse.
+    Display instruction text on the frame with high-quality rendering and smooth transitions.
     
     Args:
         frame: The video frame to draw on
@@ -311,11 +311,12 @@ def display_instruction(frame, instruction_text, sub_text="", ellipse_center=Non
     """
     frame_height, frame_width = frame.shape[:2]
     
-    # Use a more friendly, larger font
+    # Use high-quality font with better rendering
     font = cv2.FONT_HERSHEY_DUPLEX
-    main_font_scale = 1.4
-    sub_font_scale = 1.0
-    font_thickness = 3
+    main_font_scale = 1.6  # Increased for sharper text
+    sub_font_scale = 1.2   # Increased for sharper text
+    font_thickness = 4     # Increased thickness for better visibility
+    line_type = cv2.LINE_AA  # Anti-aliased lines for smooth, professional text
     
     # Position text to the right of the ellipse, outside of it
     if ellipse_center and ellipse_axes:
@@ -340,19 +341,25 @@ def display_instruction(frame, instruction_text, sub_text="", ellipse_center=Non
         main_font_scale = (max_text_width / text_size[0]) * main_font_scale
         text_size = cv2.getTextSize(instruction_text, font, main_font_scale, font_thickness)[0]
     
-    # Draw semi-transparent background rectangle for better readability
-    bg_alpha = int(alpha * 200)  # Semi-transparent black background
-    overlay = frame.copy()
-    cv2.rectangle(
-        overlay,
-        (text_x - 15, text_y - 45),
-        (text_x + text_size[0] + 15, text_y + 15),
-        (0, 0, 0),
-        -1
-    )
-    cv2.addWeighted(overlay, alpha * 0.8, frame, 1 - alpha * 0.8, 0, frame)
+    # Calculate background rectangle coordinates
+    bg_x1 = text_x - 15
+    bg_y1 = text_y - 45
+    bg_x2 = text_x + text_size[0] + 15
+    bg_y2 = text_y + 15
     
-    # Draw main instruction with alpha blending
+    # Draw background with efficient alpha blending (no frame.copy() needed)
+    if alpha >= 0.99:
+        # Fully opaque - direct rectangle (fastest)
+        cv2.rectangle(frame, (bg_x1, bg_y1), (bg_x2, bg_y2), (0, 0, 0), -1)
+    else:
+        # Semi-transparent - use ROI for efficient blending (much faster than frame.copy())
+        bg_alpha = int(alpha * 200)
+        roi = frame[bg_y1:bg_y2, bg_x1:bg_x2]
+        overlay_rect = np.zeros_like(roi)
+        overlay_rect[:] = (0, 0, 0)
+        cv2.addWeighted(roi, 1.0 - (alpha * 0.8), overlay_rect, alpha * 0.8, 0, roi)
+    
+    # Draw main instruction with high-quality anti-aliasing
     text_color = (int(255 * alpha), int(255 * alpha), int(255 * alpha))
     cv2.putText(
         frame,
@@ -361,32 +368,38 @@ def display_instruction(frame, instruction_text, sub_text="", ellipse_center=Non
         font,
         main_font_scale,
         text_color,
-        font_thickness
+        font_thickness,
+        line_type  # Anti-aliased for sharp, professional text
     )
     
     # Draw sub-instruction if provided
     if sub_text:
         sub_text_size = cv2.getTextSize(sub_text, font, sub_font_scale, font_thickness)[0]
         sub_text_x = text_x
-        sub_text_y = text_y + 60
+        sub_text_y = text_y + 70  # Increased spacing
         
         # Ensure sub-text doesn't go off screen
         if sub_text_size[0] > max_text_width:
             sub_font_scale = (max_text_width / sub_text_size[0]) * sub_font_scale
             sub_text_size = cv2.getTextSize(sub_text, font, sub_font_scale, font_thickness)[0]
         
-        # Draw background for sub-text
-        overlay = frame.copy()
-        cv2.rectangle(
-            overlay,
-            (sub_text_x - 15, sub_text_y - 30),
-            (sub_text_x + sub_text_size[0] + 15, sub_text_y + 15),
-            (0, 0, 0),
-            -1
-        )
-        cv2.addWeighted(overlay, alpha * 0.8, frame, 1 - alpha * 0.8, 0, frame)
+        # Calculate sub-text background coordinates
+        sub_bg_x1 = sub_text_x - 15
+        sub_bg_y1 = sub_text_y - 30
+        sub_bg_x2 = sub_text_x + sub_text_size[0] + 15
+        sub_bg_y2 = sub_text_y + 15
         
-        # Draw sub-text with alpha
+        # Draw sub-text background with efficient blending
+        if alpha >= 0.99:
+            cv2.rectangle(frame, (sub_bg_x1, sub_bg_y1), (sub_bg_x2, sub_bg_y2), (0, 0, 0), -1)
+        else:
+            # Use ROI for efficient blending
+            sub_roi = frame[sub_bg_y1:sub_bg_y2, sub_bg_x1:sub_bg_x2]
+            sub_overlay = np.zeros_like(sub_roi)
+            sub_overlay[:] = (0, 0, 0)
+            cv2.addWeighted(sub_roi, 1.0 - (alpha * 0.8), sub_overlay, alpha * 0.8, 0, sub_roi)
+        
+        # Draw sub-text with high-quality anti-aliasing
         sub_text_color = (int(200 * alpha), int(200 * alpha), int(200 * alpha))
         cv2.putText(
             frame,
@@ -395,7 +408,8 @@ def display_instruction(frame, instruction_text, sub_text="", ellipse_center=Non
             font,
             sub_font_scale,
             sub_text_color,
-            font_thickness
+            font_thickness,
+            line_type  # Anti-aliased for sharp, professional text
         )
     
     return frame
@@ -451,14 +465,25 @@ def main():
         print(f"Error: {e}")
         return
     
-    # Initialize the webcam
+    # Initialize the webcam with optimized settings for high FPS
     cap = cv2.VideoCapture(0)
     
     if not cap.isOpened():
         print("Error: Could not open webcam. Please ensure a camera is connected.")
         return
     
+    # Optimize camera settings for high FPS
+    # Set buffer size to 1 to reduce latency
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    # Try to set high FPS (camera may limit this)
+    cap.set(cv2.CAP_PROP_FPS, 120)
+    # Set frame width and height for better performance
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    
     print("Webcam opened successfully.")
+    print(f"Camera FPS: {cap.get(cv2.CAP_PROP_FPS)}")
+    print(f"Camera resolution: {int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}")
     
     # Check DeepFace availability
     if not DEEPFACE_AVAILABLE:
@@ -497,15 +522,25 @@ def main():
     step_wait_time = 2.0  # Wait 2 seconds before capturing each step
     face_detected_stable = False
     stable_face_count = 0
-    required_stable_frames = 10  # Need 10 consecutive frames with face detected
+    # Reduced for higher FPS - with 60+ FPS, 5 frames is ~0.08 seconds which is sufficient
+    required_stable_frames = 5  # Need 5 consecutive frames with face detected
     
     # Animation state for smooth text transitions
     previous_instruction = ""
     current_instruction = ""
     animation_state = "fade_in"  # "fade_in", "stable", "fade_out"
     animation_start_time = None
-    fade_duration = 0.5  # 0.5 seconds for fade in/out
+    fade_duration = 0.3  # Reduced to 0.3 seconds for snappier, smoother transitions
     current_alpha = 0.0
+    last_animation_time = None  # Track last animation update for smooth interpolation
+    
+    # Performance optimization: cache ellipse mask and skip frames for detection
+    cached_ellipse_mask = None
+    cached_frame_shape = None
+    frame_counter = 0
+    detection_skip_frames = 2  # Process face detection every N frames (2 = every other frame)
+    last_detected_faces = []
+    last_has_face_detected = False
     
     try:
         while True:
@@ -515,30 +550,54 @@ def main():
                 print("Error: Failed to read frame from webcam.")
                 break
             
+            # Mirror the frame horizontally to match FaceTime behavior (mirror-like view)
+            # This makes left/right movements feel natural, like looking in a mirror
+            frame = cv2.flip(frame, 1)
+            
             frame_height, frame_width = frame.shape[:2]
             
             # Define ellipse parameters (narrower vertical ellipse at center)
             ellipse_center = (frame_width // 2, frame_height // 2)
             ellipse_axes = (int(frame_width * 0.25), int(frame_height * 0.60))
             
-            # Keep original frame for face extraction (before masking)
-            original_frame = frame.copy()
+            # Performance: Store original frame before processing (needed for face extraction)
+            # Only store when we might need it (when face is detected or getting close)
+            frame_counter += 1
             
-            # Convert to grayscale for face detection
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Skip face detection on some frames for better performance
+            # Process detection every N frames, but use last result for skipped frames
+            should_detect = (frame_counter % detection_skip_frames == 0)
             
-            # Detect faces
-            all_faces = detect_faces(gray, face_cascade)
+            if should_detect:
+                # Convert to grayscale for face detection
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                
+                # Detect faces
+                all_faces = detect_faces(gray, face_cascade)
+                
+                # Filter faces inside ellipse
+                ellipse_half_axes = (ellipse_axes[0] // 2, ellipse_axes[1] // 2)
+                filtered_faces = filter_faces_in_ellipse(
+                    all_faces,
+                    ellipse_center,
+                    ellipse_half_axes
+                )
+                
+                last_detected_faces = filtered_faces
+                last_has_face_detected = len(filtered_faces) > 0
+            else:
+                # Use cached detection results
+                filtered_faces = last_detected_faces
+                last_has_face_detected = len(filtered_faces) > 0
             
-            # Filter faces inside ellipse
-            ellipse_half_axes = (ellipse_axes[0] // 2, ellipse_axes[1] // 2)
-            filtered_faces = filter_faces_in_ellipse(
-                all_faces,
-                ellipse_center,
-                ellipse_half_axes
-            )
+            has_face_detected = last_has_face_detected
             
-            has_face_detected = len(filtered_faces) > 0
+            # Store original frame only when we have a face (for potential extraction)
+            # This avoids copying every frame when no face is present
+            if has_face_detected:
+                original_frame = frame.copy()
+            else:
+                original_frame = None
             
             # Check for stable face detection
             if has_face_detected:
@@ -549,9 +608,13 @@ def main():
                 stable_face_count = 0
                 face_detected_stable = False
             
-            # Create and apply mask
-            ellipse_mask = create_ellipse_mask(frame.shape, ellipse_center, ellipse_axes)
-            frame = apply_ellipse_mask(frame, ellipse_mask)
+            # Performance: Cache ellipse mask (only recreate if frame size changes)
+            if cached_ellipse_mask is None or cached_frame_shape != frame.shape:
+                cached_ellipse_mask = create_ellipse_mask(frame.shape, ellipse_center, ellipse_axes)
+                cached_frame_shape = frame.shape
+            
+            # Apply cached mask
+            frame = apply_ellipse_mask(frame, cached_ellipse_mask)
             
             # Draw ellipse
             frame = draw_detection_ellipse(frame, ellipse_center, ellipse_axes, has_face_detected)
@@ -581,22 +644,30 @@ def main():
                 
                 elapsed = time.time() - step_start_time
                 
-                # Update animation state and alpha
+                # Update animation state and alpha with smooth interpolation
                 current_time = time.time()
                 if animation_start_time is not None:
                     animation_elapsed = current_time - animation_start_time
                     
                     if animation_state == "fade_out":
-                        # Fade out previous instruction
-                        current_alpha = max(0.0, 1.0 - (animation_elapsed / fade_duration))
+                        # Smooth fade out with easing (ease-out curve for natural feel)
+                        progress = min(1.0, animation_elapsed / fade_duration)
+                        # Ease-out cubic for smoother transition
+                        eased_progress = 1.0 - (1.0 - progress) ** 3
+                        current_alpha = max(0.0, 1.0 - eased_progress)
+                        
                         if current_alpha <= 0.0:
-                            # Fade out complete, start fade in
+                            # Fade out complete, start fade in immediately
                             animation_state = "fade_in"
                             animation_start_time = current_time
                             current_alpha = 0.0
                     elif animation_state == "fade_in":
-                        # Fade in new instruction
-                        current_alpha = min(1.0, animation_elapsed / fade_duration)
+                        # Smooth fade in with easing (ease-in curve for natural feel)
+                        progress = min(1.0, animation_elapsed / fade_duration)
+                        # Ease-in cubic for smoother transition
+                        eased_progress = progress ** 3
+                        current_alpha = min(1.0, eased_progress)
+                        
                         if current_alpha >= 1.0:
                             # Fade in complete, stay stable
                             animation_state = "stable"
@@ -609,6 +680,8 @@ def main():
                     animation_state = "fade_in"
                     animation_start_time = current_time
                     current_alpha = 0.0
+                
+                last_animation_time = current_time
                 
                 # Display instruction with animation
                 if face_detected_stable:
@@ -638,7 +711,7 @@ def main():
                 
                 # Capture frame if face is stable and enough time has passed
                 if face_detected_stable and elapsed >= step_wait_time:
-                    if len(filtered_faces) > 0:
+                    if len(filtered_faces) > 0 and original_frame is not None:
                         # Extract face region from original frame (before masking) for better quality
                         face_rect = filtered_faces[0]
                         face_image = extract_face_region(original_frame, face_rect)
