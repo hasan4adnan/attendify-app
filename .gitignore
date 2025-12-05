@@ -1,1 +1,37 @@
+# Python virtual environments
 venv/
+tfenv/
+env/
+.venv/
+
+# Face embeddings (sensitive data - don't commit)
+embeddings/
+*.npy
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.log
+*.tmp
+test_tensorflow.py
+
+# Helper scripts (optional - remove if you want to commit them)
+fix_*.sh
+fix_*.md
+TESTING_GUIDE.md
