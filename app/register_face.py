@@ -294,67 +294,108 @@ def extract_face_region(frame, face_rect, padding=20):
         return None
 
 
-def display_instruction(frame, instruction_text, sub_text=""):
+def display_instruction(frame, instruction_text, sub_text="", ellipse_center=None, ellipse_axes=None, alpha=1.0):
     """
-    Display instruction text on the frame.
+    Display instruction text on the frame, positioned to the right of the ellipse.
     
     Args:
         frame: The video frame to draw on
         instruction_text: Main instruction string
         sub_text: Optional sub-instruction string
+        ellipse_center: Tuple (cx, cy) - center of the ellipse (for positioning)
+        ellipse_axes: Tuple (a, b) - full lengths of the ellipse axes (for positioning)
+        alpha: Float (0.0-1.0) - opacity for fade animation
     
     Returns:
         numpy.ndarray: Frame with text drawn
     """
-    frame_height = frame.shape[0]
+    frame_height, frame_width = frame.shape[:2]
     
-    # Main instruction text (centered, larger)
-    text_size = cv2.getTextSize(instruction_text, cv2.FONT_HERSHEY_SIMPLEX, 1.0, 2)[0]
-    text_x = (frame.shape[1] - text_size[0]) // 2
-    text_y = frame_height // 2 - 30
+    # Use a more friendly, larger font
+    font = cv2.FONT_HERSHEY_DUPLEX
+    main_font_scale = 1.4
+    sub_font_scale = 1.0
+    font_thickness = 3
     
-    # Draw background rectangle for better readability
+    # Position text to the right of the ellipse, outside of it
+    if ellipse_center and ellipse_axes:
+        # Calculate right edge of ellipse
+        ellipse_right_edge = ellipse_center[0] + ellipse_axes[0] // 2
+        # Position text with padding from ellipse edge
+        text_x = ellipse_right_edge + 40
+    else:
+        # Fallback: position at 70% of frame width
+        text_x = int(frame_width * 0.70)
+    
+    # Center text vertically
+    text_y = frame_height // 2 - 40
+    
+    # Get text size for background rectangle
+    text_size = cv2.getTextSize(instruction_text, font, main_font_scale, font_thickness)[0]
+    
+    # Ensure text doesn't go off screen
+    max_text_width = frame_width - text_x - 20
+    if text_size[0] > max_text_width:
+        # Scale down font if needed
+        main_font_scale = (max_text_width / text_size[0]) * main_font_scale
+        text_size = cv2.getTextSize(instruction_text, font, main_font_scale, font_thickness)[0]
+    
+    # Draw semi-transparent background rectangle for better readability
+    bg_alpha = int(alpha * 200)  # Semi-transparent black background
+    overlay = frame.copy()
     cv2.rectangle(
-        frame,
-        (text_x - 10, text_y - 35),
-        (text_x + text_size[0] + 10, text_y + 10),
+        overlay,
+        (text_x - 15, text_y - 45),
+        (text_x + text_size[0] + 15, text_y + 15),
         (0, 0, 0),
         -1
     )
+    cv2.addWeighted(overlay, alpha * 0.8, frame, 1 - alpha * 0.8, 0, frame)
     
-    # Draw main instruction
+    # Draw main instruction with alpha blending
+    text_color = (int(255 * alpha), int(255 * alpha), int(255 * alpha))
     cv2.putText(
         frame,
         instruction_text,
         (text_x, text_y),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        1.0,
-        (255, 255, 255),  # White text
-        2
+        font,
+        main_font_scale,
+        text_color,
+        font_thickness
     )
     
     # Draw sub-instruction if provided
     if sub_text:
-        sub_text_size = cv2.getTextSize(sub_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-        sub_text_x = (frame.shape[1] - sub_text_size[0]) // 2
-        sub_text_y = text_y + 50
+        sub_text_size = cv2.getTextSize(sub_text, font, sub_font_scale, font_thickness)[0]
+        sub_text_x = text_x
+        sub_text_y = text_y + 60
         
+        # Ensure sub-text doesn't go off screen
+        if sub_text_size[0] > max_text_width:
+            sub_font_scale = (max_text_width / sub_text_size[0]) * sub_font_scale
+            sub_text_size = cv2.getTextSize(sub_text, font, sub_font_scale, font_thickness)[0]
+        
+        # Draw background for sub-text
+        overlay = frame.copy()
         cv2.rectangle(
-            frame,
-            (sub_text_x - 10, sub_text_y - 25),
-            (sub_text_x + sub_text_size[0] + 10, sub_text_y + 10),
+            overlay,
+            (sub_text_x - 15, sub_text_y - 30),
+            (sub_text_x + sub_text_size[0] + 15, sub_text_y + 15),
             (0, 0, 0),
             -1
         )
+        cv2.addWeighted(overlay, alpha * 0.8, frame, 1 - alpha * 0.8, 0, frame)
         
+        # Draw sub-text with alpha
+        sub_text_color = (int(200 * alpha), int(200 * alpha), int(200 * alpha))
         cv2.putText(
             frame,
             sub_text,
             (sub_text_x, sub_text_y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (200, 200, 200),  # Light gray text
-            2
+            font,
+            sub_font_scale,
+            sub_text_color,
+            font_thickness
         )
     
     return frame
@@ -458,6 +499,14 @@ def main():
     stable_face_count = 0
     required_stable_frames = 10  # Need 10 consecutive frames with face detected
     
+    # Animation state for smooth text transitions
+    previous_instruction = ""
+    current_instruction = ""
+    animation_state = "fade_in"  # "fade_in", "stable", "fade_out"
+    animation_start_time = None
+    fade_duration = 0.5  # 0.5 seconds for fade in/out
+    current_alpha = 0.0
+    
     try:
         while True:
             ret, frame = cap.read()
@@ -511,19 +560,81 @@ def main():
             if current_step < len(registration_steps):
                 instruction = registration_steps[current_step]
                 
+                # Handle instruction change and animation
+                if instruction != current_instruction:
+                    # Instruction changed - start fade out then fade in
+                    if current_instruction != "":
+                        # Start fade out of previous instruction
+                        animation_state = "fade_out"
+                        animation_start_time = time.time()
+                    else:
+                        # First instruction - start fade in
+                        animation_state = "fade_in"
+                        animation_start_time = time.time()
+                    
+                    previous_instruction = current_instruction
+                    current_instruction = instruction
+                
                 # Initialize step timer
                 if step_start_time is None:
                     step_start_time = time.time()
                 
                 elapsed = time.time() - step_start_time
                 
-                # Display instruction
+                # Update animation state and alpha
+                current_time = time.time()
+                if animation_start_time is not None:
+                    animation_elapsed = current_time - animation_start_time
+                    
+                    if animation_state == "fade_out":
+                        # Fade out previous instruction
+                        current_alpha = max(0.0, 1.0 - (animation_elapsed / fade_duration))
+                        if current_alpha <= 0.0:
+                            # Fade out complete, start fade in
+                            animation_state = "fade_in"
+                            animation_start_time = current_time
+                            current_alpha = 0.0
+                    elif animation_state == "fade_in":
+                        # Fade in new instruction
+                        current_alpha = min(1.0, animation_elapsed / fade_duration)
+                        if current_alpha >= 1.0:
+                            # Fade in complete, stay stable
+                            animation_state = "stable"
+                            current_alpha = 1.0
+                    elif animation_state == "stable":
+                        # Keep alpha at 1.0
+                        current_alpha = 1.0
+                else:
+                    # Initialize animation
+                    animation_state = "fade_in"
+                    animation_start_time = current_time
+                    current_alpha = 0.0
+                
+                # Display instruction with animation
                 if face_detected_stable:
                     sub_text = "Face detected. Hold still..."
                 else:
                     sub_text = "Please position your face in the ellipse."
                 
-                frame = display_instruction(frame, instruction, sub_text)
+                # Show previous instruction during fade out, then new instruction during fade in/stable
+                if animation_state == "fade_out" and previous_instruction:
+                    frame = display_instruction(
+                        frame, 
+                        previous_instruction, 
+                        sub_text, 
+                        ellipse_center, 
+                        ellipse_axes, 
+                        current_alpha
+                    )
+                else:
+                    frame = display_instruction(
+                        frame, 
+                        current_instruction, 
+                        sub_text, 
+                        ellipse_center, 
+                        ellipse_axes, 
+                        current_alpha
+                    )
                 
                 # Capture frame if face is stable and enough time has passed
                 if face_detected_stable and elapsed >= step_wait_time:
@@ -567,7 +678,7 @@ def main():
                     # Display completion message
                     completion_text = "Face registration completed."
                     exit_text = "Press 'q' to exit."
-                    frame = display_instruction(frame, completion_text, exit_text)
+                    frame = display_instruction(frame, completion_text, exit_text, ellipse_center, ellipse_axes, 1.0)
                     
                     # Wait for 'q' key
                     cv2.imshow('Attendify - Face Registration', frame)
@@ -578,7 +689,7 @@ def main():
                     break
                 else:
                     # Should not happen, but handle edge case
-                    frame = display_instruction(frame, "Error: No embeddings collected.", "Press 'q' to exit.")
+                    frame = display_instruction(frame, "Error: No embeddings collected.", "Press 'q' to exit.", ellipse_center, ellipse_axes, 1.0)
             
             # Calculate and display FPS
             fps_frame_count += 1
